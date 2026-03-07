@@ -2,7 +2,7 @@
 // auth.js — Middleware to protect routes
 // Middleware = a function that runs BEFORE the route handler
 // ============================================================
-
+ 
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
