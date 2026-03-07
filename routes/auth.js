@@ -1,24 +1,66 @@
 // ============================================================
-// auth.js — Routes for registration, login, verification
+// auth.js — All authentication routes
 // ============================================================
 
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
 const { sendVerificationEmail } = require('../utils/email');
 
+
+// -------------------------------------------------------
 // Helper: create a JWT token for a user
 // The token contains the user's ID and expires in 30 days
+// -------------------------------------------------------
 function createToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '30d' });
 }
 
+// -------------------------------------------------------
 // Helper: generate a random 6-digit number as a string
-function generateVerificationCode() {
+// Example output: "482910"
+// -------------------------------------------------------
+function generateCode() {
   const code = Math.floor(100000 + Math.random() * 900000);
   return code.toString();
+}
+
+// -------------------------------------------------------
+// Helper: check if validation failed and send the error
+// Returns the error response, or null if everything is fine
+// -------------------------------------------------------
+function checkValidation(req, res) {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    // Send back just the first error message (keeps it simple)
+    return res.status(400).json({ message: errors.array()[0].msg });
+  }
+  return null;
+}
+
+// -------------------------------------------------------
+// Helper: save a new code on the user and email it to them
+// Used by both resend-code and forgot-password
+// -------------------------------------------------------
+async function sendCodeToUser(user) {
+  const newCode = generateCode();
+  const fifteenMinutes = new Date(Date.now() + 15 * 60 * 1000);
+
+  user.verificationCode = newCode;
+  user.verificationCodeExpiry = fifteenMinutes;
+  await user.save();
+
+  // Try to send the email — don't crash if it fails
+  try {
+    await sendVerificationEmail(user.email, user.name, newCode);
+  } catch (emailError) {
+    console.log('Email sending failed:', emailError.message);
+  }
+
+  return newCode;
 }
 
 
@@ -26,95 +68,90 @@ function generateVerificationCode() {
 // POST /api/auth/register
 // Create a new account and send a verification email
 // ============================================================
-router.post('/register', async (req, res) => {
-  try {
-    const { name, email, password, role, phone } = req.body;
+router.post(
+  '/register',
+  body('name').trim().notEmpty().withMessage('Name is required.'),
+  body('email').isEmail().withMessage('Please enter a valid email.').normalizeEmail(),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters.'),
+  async (req, res) => {
+    // Stop here if validation failed
+    const validationError = checkValidation(req, res);
+    if (validationError) return validationError;
 
-    // Check if someone already registered with this email
-    const existingUser = await User.findOne({ email: email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'This email is already registered.' });
-    }
-
-    // Only allow buyers and agents to register (not admins)
-    const allowedRoles = ['buyer', 'agent'];
-    const userRole = allowedRoles.includes(role) ? role : 'buyer';
-
-    // Create the verification code and set it to expire in 15 minutes
-    const verificationCode = generateVerificationCode();
-    const fifteenMinutesFromNow = new Date(Date.now() + 15 * 60 * 1000);
-
-    // Create the user in the database
-    // The password will be hashed automatically by the User model
-    const newUser = await User.create({
-      name: name,
-      email: email,
-      password: password,
-      role: userRole,
-      phone: phone,
-      verificationCode: verificationCode,
-      verificationCodeExpiry: fifteenMinutesFromNow,
-      isVerified: false,
-    });
-
-    // Try to send the verification email
-    // We use try/catch so if email fails, registration still works
     try {
-      await sendVerificationEmail(email, name, verificationCode);
-    } catch (emailError) {
-      console.log('Email sending failed:', emailError.message);
+      const { name, email, password, role, phone } = req.body;
+
+      // Check if this email is already taken
+      const existingUser = await User.findOne({ email: email });
+      if (existingUser) {
+        return res.status(400).json({ message: 'This email is already registered.' });
+      }
+
+      // Only allow buyer and agent roles — not admin
+      const allowedRoles = ['buyer', 'agent'];
+      const userRole = allowedRoles.includes(role) ? role : 'buyer';
+
+      // Create the user (password gets hashed automatically by the User model)
+      const newUser = await User.create({
+        name: name,
+        email: email,
+        password: password,
+        role: userRole,
+        phone: phone,
+        isVerified: false,
+      });
+
+      // Send the verification code
+      await sendCodeToUser(newUser);
+
+      res.status(201).json({
+        message: 'Account created! Check your email for the verification code.',
+        userId: newUser._id,
+        email: newUser.email,
+      });
+
+    } catch (error) {
+      res.status(500).json({ message: error.message });
     }
-
-    // Send back the userId and email so the frontend can show the verify page
-    res.status(201).json({
-      message: 'Account created! Check your email for the verification code.',
-      userId: newUser._id,
-      email: newUser.email,
-    });
-
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
-});
+);
 
 
 // ============================================================
 // POST /api/auth/verify-email
-// Check the 6-digit code the user entered
+// Check the 6-digit code the user typed in
 // ============================================================
 router.post('/verify-email', async (req, res) => {
   try {
     const { userId, code } = req.body;
 
-    // Find the user by their ID
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    // Check if already verified
     if (user.isVerified) {
       return res.status(400).json({ message: 'Email is already verified.' });
     }
 
-    // Check if the code matches
+    // Check the code matches what we stored
     if (user.verificationCode !== code.trim()) {
       return res.status(400).json({ message: 'Incorrect verification code.' });
     }
 
-    // Check if the code has expired
+    // Check the code hasn't expired
     const now = new Date();
     if (now > user.verificationCodeExpiry) {
       return res.status(400).json({ message: 'Code has expired. Please request a new one.' });
     }
 
-    // Mark the user as verified and clear the code fields
+    // Mark as verified and clear the code fields
     user.isVerified = true;
     user.verificationCode = undefined;
     user.verificationCodeExpiry = undefined;
     await user.save();
 
-    // Log them in by sending back a token
+    // Log them in immediately by sending a token
     const token = createToken(user._id);
 
     res.json({
@@ -137,7 +174,7 @@ router.post('/verify-email', async (req, res) => {
 
 // ============================================================
 // POST /api/auth/resend-code
-// Send a fresh verification code to the user's email
+// Send a fresh verification code to the user
 // ============================================================
 router.post('/resend-code', async (req, res) => {
   try {
@@ -152,21 +189,19 @@ router.post('/resend-code', async (req, res) => {
       return res.status(400).json({ message: 'Email is already verified.' });
     }
 
-    // Rate limit: don't allow resend if the current code is less than 60 seconds old
+    // Rate limit: block resend if the last code was sent less than 60 seconds ago
     if (user.verificationCodeExpiry) {
-      const codeAge = Date.now() - (user.verificationCodeExpiry - 15 * 60 * 1000);
-      if (codeAge < 60 * 1000) {
-        return res.status(429).json({ message: 'Please wait 60 seconds before requesting a new code.' });
+      const codeCreatedAt = user.verificationCodeExpiry.getTime() - (15 * 60 * 1000);
+      const secondsSinceLastSend = (Date.now() - codeCreatedAt) / 1000;
+
+      if (secondsSinceLastSend < 60) {
+        return res.status(429).json({
+          message: 'Please wait 60 seconds before requesting a new code.',
+        });
       }
     }
 
-    // Generate a fresh code
-    const newCode = generateVerificationCode();
-    user.verificationCode = newCode;
-    user.verificationCodeExpiry = new Date(Date.now() + 15 * 60 * 1000);
-    await user.save();
-
-    await sendVerificationEmail(user.email, user.name, newCode);
+    await sendCodeToUser(user);
 
     res.json({ message: 'A new code has been sent to your email.' });
 
@@ -180,97 +215,177 @@ router.post('/resend-code', async (req, res) => {
 // POST /api/auth/login
 // Log in with email and password
 // ============================================================
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
+router.post(
+  '/login',
+  body('email').isEmail().withMessage('Please enter a valid email.').normalizeEmail(),
+  body('password').notEmpty().withMessage('Password is required.'),
+  async (req, res) => {
+    const validationError = checkValidation(req, res);
+    if (validationError) return validationError;
 
-    // Find the user by email
-    const user = await User.findOne({ email: email });
+    try {
+      const { email, password } = req.body;
 
-    // If no user found or password is wrong, send the same error
-    // (We don't tell them WHICH one is wrong for security reasons)
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password.' });
-    }
+      // Find the user by email
+      const user = await User.findOne({ email: email });
 
-    const passwordIsCorrect = await user.comparePassword(password);
-    if (!passwordIsCorrect) {
-      return res.status(401).json({ message: 'Invalid email or password.' });
-    }
-
-    // Check if the account is active (not banned)
-    if (!user.isActive) {
-      return res.status(403).json({ message: 'Your account has been deactivated.' });
-    }
-
-    // Check if the email is verified
-    if (!user.isVerified) {
-      // Send them a fresh code and redirect them to the verify page
-      const newCode = generateVerificationCode();
-      user.verificationCode = newCode;
-      user.verificationCodeExpiry = new Date(Date.now() + 15 * 60 * 1000);
-      await user.save();
-
-      try {
-        await sendVerificationEmail(user.email, user.name, newCode);
-      } catch (emailError) {
-        console.log('Email failed:', emailError.message);
+      // Don't tell them which one is wrong (email or password) — security best practice
+      if (!user) {
+        return res.status(401).json({ message: 'Invalid email or password.' });
       }
 
-      return res.status(403).json({
-        message: 'Please verify your email. We sent a new code.',
-        unverified: true,
-        userId: user._id,
-        email: user.email,
+      const passwordIsCorrect = await user.comparePassword(password);
+      if (!passwordIsCorrect) {
+        return res.status(401).json({ message: 'Invalid email or password.' });
+      }
+
+      // Check if account was deactivated by admin
+      if (!user.isActive) {
+        return res.status(403).json({ message: 'Your account has been deactivated.' });
+      }
+
+      // If not verified, send a fresh code and redirect to verify page
+      if (!user.isVerified) {
+        await sendCodeToUser(user);
+
+        return res.status(403).json({
+          message: 'Please verify your email first. We sent a new code.',
+          unverified: true,
+          userId: user._id,
+          email: user.email,
+        });
+      }
+
+      // All good — send the token
+      const token = createToken(user._id);
+
+      res.json({
+        token: token,
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          avatar: user.avatar,
+          isVerified: user.isVerified,
+        },
       });
+
+    } catch (error) {
+      res.status(500).json({ message: error.message });
     }
-
-    // Everything is good — create a token and send it back
-    const token = createToken(user._id);
-
-    res.json({
-      token: token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        avatar: user.avatar,
-        isVerified: user.isVerified,
-      },
-    });
-
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
-});
+);
+
+
+// ============================================================
+// POST /api/auth/forgot-password
+// Step 1: User enters their email → we send them a reset code
+// ============================================================
+router.post(
+  '/forgot-password',
+  body('email').isEmail().withMessage('Please enter a valid email.').normalizeEmail(),
+  async (req, res) => {
+    const validationError = checkValidation(req, res);
+    if (validationError) return validationError;
+
+    try {
+      const { email } = req.body;
+
+      const user = await User.findOne({ email: email });
+
+      // IMPORTANT: Always return the same message whether or not the email exists
+      // This prevents attackers from finding out which emails are registered
+      if (!user) {
+        return res.json({
+          message: 'If that email is registered, a reset code has been sent.',
+        });
+      }
+
+      // Send the reset code to their email
+      await sendCodeToUser(user);
+
+      res.json({
+        message: 'If that email is registered, a reset code has been sent.',
+        userId: user._id, // Frontend needs this to submit the new password
+      });
+
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+
+// ============================================================
+// POST /api/auth/reset-password
+// Step 2: User enters the code + new password
+// ============================================================
+router.post(
+  '/reset-password',
+  body('code').notEmpty().withMessage('Reset code is required.'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters.'),
+  async (req, res) => {
+    const validationError = checkValidation(req, res);
+    if (validationError) return validationError;
+
+    try {
+      const { userId, code, password } = req.body;
+
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ message: 'User not found.' });
+      }
+
+      // Check the code matches
+      if (user.verificationCode !== code.trim()) {
+        return res.status(400).json({ message: 'Incorrect reset code.' });
+      }
+
+      // Check the code hasn't expired
+      const now = new Date();
+      if (now > user.verificationCodeExpiry) {
+        return res.status(400).json({ message: 'Reset code has expired. Please request a new one.' });
+      }
+
+      // Set the new password — the User model will hash it automatically on save
+      user.password = password;
+      user.verificationCode = undefined;
+      user.verificationCodeExpiry = undefined;
+      await user.save();
+
+      res.json({ message: 'Password reset successfully. You can now log in.' });
+
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
 
 
 // ============================================================
 // GET /api/auth/me
-// Get the currently logged in user's info
+// Get the currently logged in user's data
 // ============================================================
 router.get('/me', protect, async (req, res) => {
-  // protect middleware already found and attached the user
-  // so we just send it back
+  // The protect middleware already found the user and attached it to req.user
   res.json(req.user);
 });
 
 
 // ============================================================
 // PUT /api/auth/profile
-// Update the logged in user's profile
+// Update the logged in user's profile info
 // ============================================================
 router.put('/profile', protect, async (req, res) => {
   try {
     const { name, phone, bio } = req.body;
 
-    // Find the user and update their info
     const updatedUser = await User.findByIdAndUpdate(
       req.user._id,
       { name: name, phone: phone, bio: bio },
-      { new: true }  // return the UPDATED document, not the old one
-    ).select('-password');  // don't include the password in the response
+      { new: true }       // Return the updated document, not the old one
+    ).select('-password'); // Never include the password in responses
 
     res.json(updatedUser);
 
@@ -282,23 +397,23 @@ router.put('/profile', protect, async (req, res) => {
 
 // ============================================================
 // PUT /api/auth/saved/:propertyId
-// Toggle save/unsave a property for the logged in user
+// Toggle save / unsave a property for the logged in user
 // ============================================================
 router.put('/saved/:propertyId', protect, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
     const propertyId = req.params.propertyId;
 
-    // Check if this property is already saved
+    // Check if already saved
     const alreadySaved = user.savedProperties.includes(propertyId);
 
     if (alreadySaved) {
-      // Remove it from saved
+      // Remove it
       user.savedProperties = user.savedProperties.filter(
         (id) => id.toString() !== propertyId
       );
     } else {
-      // Add it to saved
+      // Add it
       user.savedProperties.push(propertyId);
     }
 
