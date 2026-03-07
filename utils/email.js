@@ -9,27 +9,17 @@ const nodemailer = require('nodemailer');
 // Create a transporter (the email sender connection)
 // We create it fresh each time in case .env changes
 // -------------------------------------------------------
-import nodemailer from 'nodemailer';
-
-const createTransporter = () => {
-  const port = parseInt(process.env.EMAIL_PORT) || 465;
-  const secure = port === 465; // true for SSL
-
+function createTransporter() {
   return nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port,
-    secure,
+    host: process.env.EMAIL_HOST,          // e.g. smtp.gmail.com
+    port: parseInt(process.env.EMAIL_PORT) || 587,
+    secure: process.env.EMAIL_PORT === '465', // true for port 465, false for 587
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-    tls: {
-      rejectUnauthorized: false, // avoids SSL certificate issues on Render
+      user: process.env.EMAIL_USER,        // Your email address
+      pass: process.env.EMAIL_PASS,        // Your app password
     },
   });
-};
-
-export default createTransporter;
+}
 
 // -------------------------------------------------------
 // Build the base HTML email template
