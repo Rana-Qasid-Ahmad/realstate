@@ -1,76 +1,75 @@
 // ============================================================
-// agents.js — Routes for agent profiles
+// agents.js — Agent profile routes
+// Fixed: N+1 query problem (was doing 1 DB query per agent)
+// Now: single aggregation query for all agents + their counts
 // ============================================================
 
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const Property = require('../models/Property');
-
+const { cacheGet, cacheSet } = require('../config/redis');
 
 // ============================================================
-// GET /api/agents
-// Get all agents with their property count
+// GET /api/agents — Cached agent list with property counts
 // ============================================================
 router.get('/', async (req, res) => {
   try {
-    // Find all users who are agents and are not deactivated
+    const cacheKey = 'agents:list';
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json(cached);
+
+    // Use aggregation to get agents + property counts in ONE query
+    // instead of N+1 (one count query per agent)
     const agents = await User.find({ role: 'agent', isActive: true })
-      .select('-password');
+      .select('-password')
+      .lean();
 
-    // For each agent, count how many approved properties they have
-    // Promise.all runs all the counts at the same time (faster than one by one)
-    const agentsWithPropertyCount = await Promise.all(
-      agents.map(async (agent) => {
-        const count = await Property.countDocuments({
-          agent: agent._id,
-          isApproved: true,
-        });
+    const agentIds = agents.map(a => a._id);
 
-        // Convert the mongoose document to a plain object and add propertyCount
-        return {
-          ...agent.toObject(),
-          propertyCount: count,
-        };
-      })
-    );
+    // Single aggregation query to count approved properties per agent
+    const propertyCounts = await Property.aggregate([
+      { $match: { agent: { $in: agentIds }, isApproved: true } },
+      { $group: { _id: '$agent', count: { $sum: 1 } } },
+    ]);
 
-    res.json(agentsWithPropertyCount);
+    const countMap = {};
+    propertyCounts.forEach(p => { countMap[p._id.toString()] = p.count; });
 
+    const result = agents.map(agent => ({
+      ...agent,
+      propertyCount: countMap[agent._id.toString()] || 0,
+    }));
+
+    await cacheSet(cacheKey, result, 120); // cache 2 min
+    res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
-
 
 // ============================================================
 // GET /api/agents/:id
-// Get a single agent's profile and their listings
 // ============================================================
 router.get('/:id', async (req, res) => {
   try {
-    // Find the user but only if they are an agent
-    const agent = await User.findOne({
-      _id: req.params.id,
-      role: 'agent',
-    }).select('-password');
+    const cacheKey = `agents:detail:${req.params.id}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json(cached);
 
-    if (!agent) {
-      return res.status(404).json({ message: 'Agent not found.' });
-    }
+    const [agent, properties] = await Promise.all([
+      User.findOne({ _id: req.params.id, role: 'agent' }).select('-password').lean(),
+      Property.find({ agent: req.params.id, isApproved: true }).sort({ createdAt: -1 }).lean(),
+    ]);
 
-    // Get all approved properties listed by this agent
-    const properties = await Property.find({
-      agent: agent._id,
-      isApproved: true,
-    }).sort({ createdAt: -1 });
+    if (!agent) return res.status(404).json({ message: 'Agent not found.' });
 
-    res.json({ agent: agent, properties: properties });
-
+    const result = { agent, properties };
+    await cacheSet(cacheKey, result, 120);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
-
 
 module.exports = router;

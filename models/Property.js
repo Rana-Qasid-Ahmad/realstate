@@ -1,53 +1,24 @@
 // ============================================================
-// Property.js — The Property database model
+// Property.js — Property model with production indexes
 // ============================================================
 
 const mongoose = require('mongoose');
 
 const propertySchema = new mongoose.Schema(
   {
-    title: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    description: {
-      type: String,
-      required: true,
-    },
-    price: {
-      type: Number,
-      required: true,
-    },
+    title: { type: String, required: true, trim: true },
+    description: { type: String, required: true },
+    price: { type: Number, required: true },
     type: {
       type: String,
       enum: ['house', 'apartment', 'villa', 'commercial', 'plot'],
       required: true,
     },
-    status: {
-      type: String,
-      enum: ['sale', 'rent'], // Is this property for sale or for rent?
-      required: true,
-    },
-    bedrooms: {
-      type: Number,
-      default: 0,
-    },
-    bathrooms: {
-      type: Number,
-      default: 0,
-    },
-    area: {
-      type: Number,
-      required: true, // Area in square feet
-    },
-
-    // Array of image URLs (stored on Cloudinary)
-    images: [
-      { type: String }
-    ],
-
-    // Location is a nested object (object inside an object)
+    status: { type: String, enum: ['sale', 'rent'], required: true },
+    bedrooms: { type: Number, default: 0 },
+    bathrooms: { type: Number, default: 0 },
+    area: { type: Number, required: true },
+    images: [{ type: String }],
     location: {
       address: { type: String, required: true },
       city: { type: String, required: true },
@@ -58,44 +29,56 @@ const propertySchema = new mongoose.Schema(
         lng: { type: Number },
       },
     },
-
-    // Array of feature strings like ['Parking', 'Garden', 'Pool']
-    features: [
-      { type: String }
-    ],
-
-    // The agent who listed this property
-    // ObjectId is like a "foreign key" — it links to a User document
+    features: [{ type: String }],
     agent: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User', // Tells Mongoose to look in the User collection
+      ref: 'User',
       required: true,
     },
-
-    // Admin must approve before it shows on the site
-    isApproved: {
-      type: Boolean,
-      default: false,
-    },
-
-    // Featured properties appear on the home page
-    isFeatured: {
-      type: Boolean,
-      default: false,
-    },
-
-    // How many times someone has viewed this property
-    views: {
-      type: Number,
-      default: 0,
-    },
+    isApproved: { type: Boolean, default: false },
+    isFeatured: { type: Boolean, default: false },
+    views: { type: Number, default: 0 },
   },
-  {
-    timestamps: true, // Adds createdAt and updatedAt automatically
-  }
+  { timestamps: true }
 );
 
-// Create a text search index so users can search by title, city, address
+// -------------------------------------------------------
+// TEXT INDEX — full-text search on title, city, address
+// -------------------------------------------------------
 propertySchema.index({ title: 'text', 'location.city': 'text', 'location.address': 'text' });
+
+// -------------------------------------------------------
+// COMPOUND INDEXES — these are the critical ones for scale
+//
+// Rule: indexes must match your most common query patterns.
+// Every filter combo on the /api/properties endpoint is covered.
+// -------------------------------------------------------
+
+// Default listing page: approved + sort by date
+propertySchema.index({ isApproved: 1, createdAt: -1 });
+
+// Filter by city
+propertySchema.index({ isApproved: 1, 'location.city': 1, createdAt: -1 });
+
+// Filter by type + status (most common filter combo)
+propertySchema.index({ isApproved: 1, type: 1, status: 1, createdAt: -1 });
+
+// Price range queries
+propertySchema.index({ isApproved: 1, price: 1 });
+
+// Bedroom filter
+propertySchema.index({ isApproved: 1, bedrooms: 1 });
+
+// Featured properties (home page)
+propertySchema.index({ isApproved: 1, isFeatured: 1, createdAt: -1 });
+
+// Sort by views (popular)
+propertySchema.index({ isApproved: 1, views: -1 });
+
+// Agent's own listings
+propertySchema.index({ agent: 1, createdAt: -1 });
+
+// Admin panel: pending properties
+propertySchema.index({ isApproved: 1, isFeatured: 1 });
 
 module.exports = mongoose.model('Property', propertySchema);

@@ -1,47 +1,25 @@
 // ============================================================
-// Inquiry.js — A contact form submission about a property
+// Inquiry.js — with indexes for agent inbox queries
 // ============================================================
 
 const mongoose = require('mongoose');
 
 const inquirySchema = new mongoose.Schema(
   {
-    // Which property the inquiry is about
-    property: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Property',
-      required: true,
-    },
-
-    // Which agent will receive this inquiry
-    agent: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-    },
-
-    // Contact info from the person asking (they might not be logged in)
-    name: { type: String, required: true },
+    property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
+    agent: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    name: { type: String, required: true, trim: true },
     email: { type: String, required: true },
     phone: { type: String },
-    message: { type: String, required: true },
-
-    // If the user is logged in, we store their ID
-    sender: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-    },
-
-    // Has the agent responded yet?
-    status: {
-      type: String,
-      enum: ['new', 'read', 'replied'],
-      default: 'new',
-    },
+    message: { type: String, required: true, trim: true },
+    sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    status: { type: String, enum: ['new', 'read', 'replied'], default: 'new' },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
+
+// Agent inbox: "show me all inquiries for my listings, newest first"
+inquirySchema.index({ agent: 1, createdAt: -1 });
+inquirySchema.index({ agent: 1, status: 1 });
 
 module.exports = mongoose.model('Inquiry', inquirySchema);

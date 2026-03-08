@@ -1,43 +1,36 @@
 // ============================================================
-// Message.js — A single chat message
+// Message.js — with index on conversation+createdAt
 // ============================================================
 
 const mongoose = require('mongoose');
 
 const messageSchema = new mongoose.Schema(
   {
-    // Which conversation this message belongs to
     conversation: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Conversation',
       required: true,
     },
-
-    // Who sent this message
     sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
     },
+    text: { type: String, required: true, trim: true, maxlength: 5000 },
 
-    // The actual message text
-    text: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    // Array of user IDs who have read this message
-    readBy: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-      }
-    ],
+    // Simplified from array to boolean — for 1-on-1 chat this is sufficient
+    // and avoids an ever-growing array on every message document
+    isRead: { type: Boolean, default: false },
+    readAt: { type: Date },
   },
-  {
-    timestamps: true, // createdAt = when the message was sent
-  }
+  { timestamps: true }
 );
+
+// Critical index: fetching messages for a conversation in order
+// Without this, MongoDB scans ALL messages to find ones in a conversation
+messageSchema.index({ conversation: 1, createdAt: 1 });
+
+// For unread count queries
+messageSchema.index({ conversation: 1, isRead: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);
