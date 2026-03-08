@@ -9,7 +9,10 @@ async function updateConversationAfterMessage(conversationId, messageId, senderI
   const otherParticipants = conversation.participants.filter(p => p.toString() !== senderId.toString());
   const unreadUpdate = {};
   for (const participantId of otherParticipants) {
-    const current = conversation.unreadCount?.get(participantId.toString()) || 0;
+    const unreadMap = conversation.unreadCount || {};
+    const current = (unreadMap instanceof Map)
+      ? (unreadMap.get(participantId.toString()) || 0)
+      : (unreadMap[participantId.toString()] || 0);
     unreadUpdate[`unreadCount.${participantId}`] = current + 1;
   }
   await Conversation.findByIdAndUpdate(conversationId, {
@@ -122,8 +125,11 @@ router.get('/unread', protect, async (req, res) => {
       .select('unreadCount')
       .lean();
     const total = conversations.reduce((sum, c) => {
-      const map = c.unreadCount;
-      return sum + (map instanceof Map ? (map.get(req.user._id.toString()) || 0) : (map?.[req.user._id.toString()] || 0));
+      const unreadMap = c.unreadCount || {};
+      const count = (unreadMap instanceof Map)
+        ? (unreadMap.get(req.user._id.toString()) || 0)
+        : (unreadMap[req.user._id.toString()] || 0);
+      return sum + count;
     }, 0);
     res.json({ total });
   } catch (err) {

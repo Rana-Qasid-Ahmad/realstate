@@ -27,6 +27,10 @@ dotenv.config();
 
 const { connectRedis, getRedisClient, getRedisSubscriber, isRedisAvailable, cacheGet } = require('./config/redis');
 
+// Import email queue so processors register when server starts
+// (emails will be processed in this same process — no separate worker needed)
+require('./config/emailQueue');
+
 async function startServer() {
   // -------------------------------------------------------
   // 1. Connect Redis FIRST (before socket adapter setup)
@@ -120,7 +124,11 @@ async function startServer() {
     );
     const unreadUpdate = {};
     for (const participantId of otherParticipants) {
-      const current = conversation.unreadCount?.get(participantId.toString()) || 0;
+      // .lean() converts Mongoose Map → plain JS object, so use bracket access not .get()
+      const unreadMap = conversation.unreadCount || {};
+      const current = (unreadMap instanceof Map)
+        ? (unreadMap.get(participantId.toString()) || 0)
+        : (unreadMap[participantId.toString()] || 0);
       unreadUpdate[`unreadCount.${participantId}`] = current + 1;
     }
     await Conversation.findByIdAndUpdate(conversationId, {
